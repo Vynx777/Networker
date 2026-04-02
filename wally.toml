@@ -1,0 +1,11 @@
+[package]
+name = "vynx777/networker"
+description = "A strictly typed, Promise-based networking wrapper for Roblox client-server communication."
+version = "0.0.1"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
+authors = ["vynx777"]
+license = "MIT"
+
+[dependencies]
+Promise = "evaera/promise@^4.0.0"
