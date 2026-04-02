@@ -3,7 +3,6 @@
 
 -- Services:
 
-local Rep = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 -- Packages:
@@ -129,7 +128,6 @@ local function _bindHandlers(
 
 		if isServer then
 			local conn = event.OnServerEvent:Connect(function(player: Player, actionName: any, ...: any)
-				-- FIX #3: validate actionName from untrusted client
 				if not _validateActionName(actionName) then
 					warn(`Networker: invalid actionName from {player.Name} — must be a non-empty string.`)
 					return
@@ -366,7 +364,7 @@ export type ServerInterface = {
 }
 
 export type MethodsConfig = {
-	Events: { [string]: any }?, -- FIX #4: keys must be strings, documented in type
+	Events: { [string]: any }?,
 	Functions: { [string]: any }?,
 }
 
