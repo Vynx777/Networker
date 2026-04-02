@@ -7,7 +7,7 @@ local RunService = game:GetService("RunService")
 
 -- Packages:
 
-local Promise = require(script.Parent.Packages.Promise)
+local Promise = require(script.Parent.Promise)
 
 -- Constants:
 
