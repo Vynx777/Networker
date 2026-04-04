@@ -4,6 +4,7 @@
 --	Namespace-based networking layer built on top of RemoteEvent and RemoteFunction.
 --	Routes all communication through a single remote per namespace via dispatch tables,
 --	eliminating stacked connections. Exposes .on() .send() .push() per namespace.
+--	Includes a built-in ServiceBridge for server-to-server communication via Networker.bridge
 --]
 
 -- Services:
@@ -30,6 +31,11 @@ export type SendBuilder = {
 type ServerCallback = (player: Player, data: { any }?) -> any?
 type ClientCallback = (data: { any }?) -> ()
 type AnyCallback = ServerCallback | ClientCallback
+
+-- >> SERVICE BRIDGE TYPES
+-- kept here so they dont leak into the rest of the module
+type BridgeCallback = (...any) -> any?
+type ServiceRegistry = { [string]: { [string]: BridgeCallback } }
 
 -- Initialization:
 local found = script:FindFirstChild("_remotes")
@@ -267,6 +273,72 @@ function Networker._createRemotes(folder: Folder)
 	return RemoteEvent, RemoteFunction
 end
 
---TODO: Add more helper function for cleaner architecture
+-- >> SERVICE BRIDGE
+-- server-only communication layer between services
+-- prevents cross-namespace client dependencies by keeping inter-service calls on the server
+-- each service registers its handlers via .bridge.on(), other services call them via .bridge.fire() or .bridge.invoke()
+do
+	local _registry: ServiceRegistry = {}
+
+	Networker.bridge = {}
+
+	-- helper that returns the action handler or throws a clear error
+	local function getHandler(serviceName: string, actionName: string): BridgeCallback
+		local service = _registry[serviceName]
+		assert(service, `[ServiceBridge] '{serviceName}' has no registered handlers`)
+
+		local fn = service[actionName]
+		assert(fn, `[ServiceBridge] '{serviceName}:{actionName}' handler not found`)
+
+		return fn
+	end
+
+	-- register a handler for an action on a service
+	-- duplicate registrations throw immediately so you catch naming conflicts early
+	function Networker.bridge.on(serviceName: string, actionName: string, fn: BridgeCallback): nil
+		assert(RunService:IsServer(), "[ServiceBridge] .on() can only be called from the server")
+
+		if not _registry[serviceName] then
+			_registry[serviceName] = {}
+		end
+
+		assert(
+			not _registry[serviceName][actionName],
+			`[ServiceBridge] '{serviceName}:{actionName}' handler already registered`
+		)
+
+		_registry[serviceName][actionName] = fn
+		return nil
+	end
+
+	-- fire a one-way action on a service, no return value expected
+	function Networker.bridge.fire(serviceName: string, actionName: string, ...: any): nil
+		assert(RunService:IsServer(), "[ServiceBridge] .fire() can only be called from the server")
+
+		local fn = getHandler(serviceName, actionName)
+		local success, err = pcall(fn, ...)
+
+		if not success then
+			error(`[ServiceBridge] '{serviceName}:{actionName}' -> {err}`)
+		end
+
+		return nil
+	end
+
+	-- invoke a two-way action on a service and return its result
+	-- use this when you need a response e.g. checking if inventory has space before adding an item
+	function Networker.bridge.invoke(serviceName: string, actionName: string, ...: any): any?
+		assert(RunService:IsServer(), "[ServiceBridge] .invoke() can only be called from the server")
+
+		local fn = getHandler(serviceName, actionName)
+		local success, result = pcall(fn, ...)
+
+		if not success then
+			error(`[ServiceBridge] '{serviceName}:{actionName}' -> {result}`)
+		end
+
+		return result
+	end
+end
 
 return Networker :: Networker
