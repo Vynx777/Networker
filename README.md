@@ -3,6 +3,8 @@
 
 Instead of managing individual remotes per action, Networker routes all communication through a **single RemoteEvent and RemoteFunction per namespace** using internal dispatch tables — keeping your remote hierarchy clean and eliminating stacked connections.
 
+Includes a built-in **ServiceBridge** for server-to-server communication between services, without cross-namespace client dependencies.
+
 ---
 
 ## Installation
@@ -29,6 +31,8 @@ Each namespace exposes three methods:
 | `.push()` | Server only | Send an action to one or more clients |
 
 Communication is always **one namespace, one RemoteEvent, one RemoteFunction** — no matter how many actions you register.
+
+For server-to-server communication, use the built-in **ServiceBridge** via `Networker.bridge`.
 
 ---
 
@@ -97,7 +101,56 @@ shopNet.push("updateShop", "all", { items = {} })
 
 ---
 
-## Usage Example
+## ServiceBridge
+
+ServiceBridge is a **server-only** communication layer between services. Instead of having clients listen to foreign namespaces, all inter-service communication stays on the server.
+
+### Why it exists
+
+```luau
+-- ❌ Wrong: InventoryClient secretly listening to shop namespace
+local shopNet = Networker.set("shop")
+shopNet.on("itemBought", function(data) end)  -- hidden dependency
+
+-- ✅ Correct: ShopServer talks directly to InventoryServer via bridge
+Networker.bridge.fire("InventoryService", "addItem", player, itemId)
+```
+
+### `Networker.bridge.on(serviceName, actionName, fn)`
+Registers a handler on a service. Other services can call it via `.fire()` or `.invoke()`.
+
+```luau
+Networker.bridge.on("InventoryService", "addItem", function(player: Player, itemId: string)
+    -- add item to inventory
+end)
+
+Networker.bridge.on("InventoryService", "hasSpace", function(player: Player): boolean
+    return #getInventory(player) < MAX_SLOTS
+end)
+```
+
+### `Networker.bridge.fire(serviceName, actionName, ...)`
+Calls a one-way action on a service. No return value expected.
+
+```luau
+Networker.bridge.fire("InventoryService", "addItem", player, "pet_egg")
+```
+
+### `Networker.bridge.invoke(serviceName, actionName, ...)`
+Calls a two-way action on a service and waits for its return value.
+
+```luau
+local hasSpace = Networker.bridge.invoke("InventoryService", "hasSpace", player)
+if hasSpace then
+    Networker.bridge.fire("InventoryService", "addItem", player, "pet_egg")
+end
+```
+
+> ⚠️ All bridge methods are server-only. Calling them from the client will throw an error.
+
+---
+
+## Full Example
 
 ### Server
 ```luau
@@ -111,7 +164,12 @@ local PRICES = {
     speed_upgrade = 250,
 }
 
--- Player wants to buy something
+-- player asks for price
+shopNet.on("getItemPrice", function(player: Player, data: { any }?)
+    return PRICES[data.itemId] or 0
+end, { TwoWay = true })
+
+-- player wants to buy something
 shopNet.on("buyItem", function(player: Player, data: { any }?)
     local itemId = data.itemId
     local price = PRICES[itemId]
@@ -121,16 +179,41 @@ shopNet.on("buyItem", function(player: Player, data: { any }?)
         return
     end
 
-    -- deduct coins, give item...
+    -- check inventory space before doing anything
+    local hasSpace = Networker.bridge.invoke("InventoryService", "hasSpace", player)
+    if not hasSpace then
+        shopNet.push("purchaseFailed", player, { reason = "Inventory full" })
+        return
+    end
+
+    -- tell InventoryServer to add the item
+    Networker.bridge.fire("InventoryService", "addItem", player, itemId)
+
+    -- tell EconomyServer to deduct coins
+    Networker.bridge.fire("EconomyService", "deductCoins", player, price)
 
     -- notify the client
     shopNet.push("purchaseSuccess", player, { itemId = itemId })
 end)
+```
 
--- Player asks for price
-shopNet.on("getItemPrice", function(player: Player, data: { any }?)
-    return PRICES[data.itemId] or 0
-end, { TwoWay = true })
+```luau
+-- ServerScriptService/InventoryServer.luau
+local Networker = require(ReplicatedStorage.Networker)
+
+local inventoryNet = Networker.set("inventory")
+
+-- register handlers for other services to call
+Networker.bridge.on("InventoryService", "hasSpace", function(player: Player): boolean
+    return #getInventory(player) < MAX_SLOTS
+end)
+
+Networker.bridge.on("InventoryService", "addItem", function(player: Player, itemId: string)
+    addToInventory(player, itemId)
+
+    -- notify only THIS service's own client
+    inventoryNet.push("syncInventory", player, { slots = getInventory(player) })
+end)
 ```
 
 ### Client
@@ -140,17 +223,65 @@ local Networker = require(ReplicatedStorage.Networker)
 
 local shopNet = Networker.set("shop")
 
--- Ask server for price before buying
 local price = shopNet.send("getItemPrice", { itemId = "pet_egg" }, { TwoWay = true })
 print("Pet Egg costs:", price)
 
--- Buy the item
 shopNet.send("buyItem", { itemId = "pet_egg" })
 
--- Listen for confirmation
 shopNet.on("purchaseSuccess", function(data: { any }?)
     print("Successfully bought:", data.itemId)
 end)
+
+shopNet.on("purchaseFailed", function(data: { any }?)
+    print("Purchase failed:", data.reason)
+end)
+```
+
+```luau
+-- StarterPlayerScripts/InventoryClient.luau
+local Networker = require(ReplicatedStorage.Networker)
+
+local inventoryNet = Networker.set("inventory")
+
+-- only ever listens to its own namespace
+inventoryNet.on("syncInventory", function(data: { any }?)
+    updateInventoryUI(data.slots)
+end)
+```
+
+---
+
+## Architecture
+
+```
+Client                          Server
+  │                               │
+  │── shopNet.send("buyItem") ───►│
+  │                               │── ShopServer handles it
+  │                               │       │
+  │                               │   bridge.invoke("InventoryService", "hasSpace")
+  │                               │       │
+  │                               │   InventoryServer returns true/false
+  │                               │       │
+  │                               │   bridge.fire("InventoryService", "addItem")
+  │                               │       │
+  │                               │   InventoryServer adds item
+  │                               │       │
+  │◄── inventoryNet ("syncInventory") ────┘
+  │◄── shopNet ("purchaseSuccess") ───────┘
+```
+
+**One namespace, one remote:**
+```
+ReplicatedStorage/
+  Networker/
+    _remotes/
+      shop/
+        RemoteEvent      ← all one-way actions for "shop"
+        RemoteFunction   ← all two-way actions for "shop"
+      inventory/
+        RemoteEvent
+        RemoteFunction
 ```
 
 ---
@@ -162,63 +293,18 @@ end)
 | `verbNoun` | Client → Server | One-way | `buyItem` `equipPet` `feedBrainrot` |
 | `verbNoun` | Server → Client | One-way | `updateCoins` `syncInventory` |
 | `getX` `checkX` `fetchX` | Client → Server | Two-way | `getItemPrice` `checkInventorySpace` |
-
----
-
-## Architecture
-
-```
-Client                        Server
-  │                             │
-  │── shopNet.send("buyItem") ──►│
-  │                             │── _serverEventCallbacks["buyItem"](player, data)
-  │                             │
-  │◄── shopNet.push("updateShop", player) ──│
-  │── _clientEventCallbacks["updateShop"](data)
-  │                             │
-  │── shopNet.send("getPrice", _, {TwoWay=true}) ──►│
-  │◄────────────── return 100 ──│
-```
-
-**Under the hood — one namespace, one remote:**
-```
-ReplicatedStorage/
-  Networker/
-    _remotes/
-      shop/
-        RemoteEvent      ← handles all one-way actions for "shop"
-        RemoteFunction   ← handles all two-way actions for "shop"
-      inventory/
-        RemoteEvent
-        RemoteFunction
-```
-
----
-
-## Server-to-Server Communication
-
-Networker handles **client ↔ server** communication only. For server-to-server (service-to-service) communication, use a separate `ServiceBridge` module:
-
-```luau
--- InventoryServer registers a handler
-ServiceBridge.on("InventoryService", "addItem", function(player, itemId)
-    -- add item to inventory
-end)
-
--- ShopServer calls it after a purchase
-ServiceBridge.fire("InventoryService", "addItem", player, "pet_egg")
-```
-
-> Each service communicates **only with its own client namespace**. Cross-namespace client communication is an anti-pattern — it creates hidden dependencies that are hard to debug.
+| `verbNoun` | bridge `.fire()` | One-way | `addItem` `deductCoins` |
+| `hasX` `checkX` `getX` | bridge `.invoke()` | Two-way | `hasSpace` `getLevel` |
 
 ---
 
 ## Error Handling
 
-All remote calls are wrapped in `pcall`. Errors are propagated with full context:
+All remote calls are wrapped in `pcall`. Errors propagate with full context:
 
 ```
 [Networker] 'shop:buyItem' -> attempt to index nil value 'itemId'
+[ServiceBridge] 'InventoryService:addItem' -> attempt to index nil value 'player'
 ```
 
 Unhandled actions produce a warning instead of a silent failure:
