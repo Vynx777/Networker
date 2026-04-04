@@ -12,8 +12,9 @@ Includes a built-in **ServiceBridge** for server-to-server communication between
 **Via Wally:**
 ```toml
 [dependencies]
-Networker = "vynx777/networker@1.0.0"
+Networker = "vynx777/networker@0.0.4"
 ```
+https://wally.run/package/vynx777/networker?version=0.0.4
 
 **Manual:**
 Place the module in `ReplicatedStorage` and require it from any script.
