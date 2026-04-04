@@ -1,180 +1,236 @@
 # Networker
+> Namespace-based networking layer for Roblox, built on top of `RemoteEvent` and `RemoteFunction`.
 
-A lightweight, namespace-based client–server networking module for Roblox, built on top of [Promise](https://eryn.io/roblox-lua-promise/). Wraps `RemoteEvent` and `RemoteFunction` into a clean, action-dispatched API with input validation, timeout protection, and full cleanup support.
-
----
-
-## Features
-
-- **Namespace isolation** — each feature area gets its own folder of remotes, keeping things organized and avoiding name collisions
-- **Action dispatch** — a single remote pair per namespace routes to named handlers, no per-feature remote clutter
-- **Promise-based invocations** — `InvokeServer` and `InvokeClient` return Promises instead of yielding raw threads
-- **`InvokeClient` timeout** — server-to-client invocations reject automatically after a configurable timeout (default: 10s), preventing server thread hangs on disconnected clients
-- **Input validation** — all `actionName` values from untrusted clients are validated before dispatch
-- **Destroy support** — both interfaces expose a `:Destroy()` method for full cleanup of connections and remote instances
-
----
-
-## Requirements
-
-- [roblox-lua-promise](https://eryn.io/roblox-lua-promise/) available at `ReplicatedStorage.Packages.Promise`
+Instead of managing individual remotes per action, Networker routes all communication through a **single RemoteEvent and RemoteFunction per namespace** using internal dispatch tables — keeping your remote hierarchy clean and eliminating stacked connections.
 
 ---
 
 ## Installation
 
-Place `Networker.luau` inside `ReplicatedStorage` (or wherever your shared modules live). Require it from both server and client scripts.
-
-```lua
-local Networker = require(game.ReplicatedStorage.Networker)
+**Via Wally:**
+```toml
+[dependencies]
+Networker = "vynx777/networker@1.0.0"
 ```
+
+**Manual:**
+Place the module in `ReplicatedStorage` and require it from any script.
 
 ---
 
-## Usage
+## Core Concepts
 
-### Server
+Each namespace exposes three methods:
 
-```lua
--- ServerScriptService/ChatServer.server.lua
-local Networker = require(game.ReplicatedStorage.Networker)
+| Method | Side | Description |
+|--------|------|-------------|
+| `.on()` | Server / Client | Register a handler for an action |
+| `.send()` | Client only | Send an action to the server |
+| `.push()` | Server only | Send an action to one or more clients |
 
-local ChatService = {}
-
-local Net = Networker.server.new("Chat", ChatService, {
-    Events = {
-        onMessage = function(self, player, text)
-            print(player.Name .. " says: " .. text)
-            -- broadcast to all clients
-            Net:FireAllClients("onMessage", player.Name, text)
-        end,
-    },
-    Functions = {
-        getHistory = function(self, player)
-            return { "Hello!", "World!" } -- example history
-        end,
-    },
-})
-```
-
-### Client
-
-```lua
--- StarterPlayerScripts/ChatClient.client.lua
-local Networker = require(game.ReplicatedStorage.Networker)
-
-local ChatClient = {}
-
-local Net = Networker.client.new("Chat", ChatClient, {
-    Events = {
-        onMessage = function(self, senderName, text)
-            print("[Chat] " .. senderName .. ": " .. text)
-        end,
-    },
-})
-
--- Fire an event to the server
-Net:FireServer("onMessage", "Hey everyone!")
-
--- Invoke the server and handle the Promise
-Net:InvokeServer("getHistory")
-    :andThen(function(history)
-        for _, msg in ipairs(history) do
-            print("[History] " .. msg)
-        end
-    end)
-    :catch(function(err)
-        warn("Failed to fetch history:", err)
-    end)
-```
+Communication is always **one namespace, one RemoteEvent, one RemoteFunction** — no matter how many actions you register.
 
 ---
 
 ## API Reference
 
-### `Networker.server.new(namespace, context, methods?)`
-
-Creates a server-side interface for the given namespace. Must be called on the **server only**.
-
-| Parameter   | Type            | Description                                      |
-|-------------|-----------------|--------------------------------------------------|
-| `namespace` | `string`        | Unique name for this remote group                |
-| `context`   | `table`         | Passed as `self` to all handler functions        |
-| `methods`   | `MethodsConfig?` | Table of `Events` and/or `Functions` to handle  |
-
-Returns a `ServerInterface`.
+### `Networker.set(namespace: string)`
+Creates or retrieves a networker instance for a given namespace.
+```luau
+local Networker = require(ReplicatedStorage.Networker)
+local shopNet = Networker.set("shop")
+```
 
 ---
 
-### `Networker.client.new(namespace, context, methods?)`
+### `.on(actionName, fn, options?)`
+Registers a handler for an incoming action.
 
-Creates a client-side interface for the given namespace. Must be called on the **client only**.
+```luau
+-- Server: receives player + data
+shopNet.on("buyItem", function(player: Player, data: { any }?)
+    print(player.Name, "wants to buy", data.itemId)
+end)
 
-| Parameter   | Type            | Description                                      |
-|-------------|-----------------|--------------------------------------------------|
-| `namespace` | `string`        | Must match the namespace used on the server      |
-| `context`   | `table`         | Passed as `self` to all handler functions        |
-| `methods`   | `MethodsConfig?` | Table of `Events` and/or `Functions` to handle  |
+-- Server TwoWay: must return a value
+shopNet.on("getItemPrice", function(player: Player, data: { any }?)
+    return 100
+end, { TwoWay = true })
 
-Returns a `ClientInterface`.
+-- Client: receives data only
+shopNet.on("updateShop", function(data: { any }?)
+    print("Shop updated:", data)
+end)
+```
 
----
-
-### `ServerInterface`
-
-| Method | Description |
-|--------|-------------|
-| `:FireClient(player, actionName, ...)` | Fires a named event to a specific client |
-| `:FireAllClients(actionName, ...)` | Fires a named event to all clients |
-| `:InvokeClient(player, actionName, ...)` | Invokes a named function on a client; returns a Promise that rejects after `INVOKE_CLIENT_TIMEOUT` seconds |
-| `:Destroy()` | Disconnects all handlers, removes remote instances, and frees the namespace |
-
----
-
-### `ClientInterface`
-
-| Method | Description |
-|--------|-------------|
-| `:FireServer(actionName, ...)` | Fires a named event to the server |
-| `:InvokeServer(actionName, ...)` | Invokes a named function on the server; returns a Promise |
-| `:Destroy()` | Disconnects all handlers and frees the namespace |
+> ⚠️ Registering the same `actionName` twice in the same namespace will throw an error.
 
 ---
 
-### `MethodsConfig`
+### `.send(actionName, data?, options?)`
+Sends an action from the **client to the server**.
 
-```lua
-type MethodsConfig = {
-    Events: { [string]: (self: any, ...any) -> () }?,
-    Functions: { [string]: (self: any, ...any) -> any }?,
+```luau
+-- One-way: fire and forget
+shopNet.send("buyItem", { itemId = "pet_egg" })
+
+-- Two-way: waits for server response
+local price = shopNet.send("getItemPrice", { itemId = "pet_egg" }, { TwoWay = true })
+print("Price is:", price)
+```
+
+---
+
+### `.push(actionName, target, data?)`
+Sends an action from the **server to one or more clients**.
+
+```luau
+-- Single player
+shopNet.push("updateShop", player, { items = {} })
+
+-- List of players
+shopNet.push("updateShop", { player1, player2 }, { items = {} })
+
+-- Everyone
+shopNet.push("updateShop", "all", { items = {} })
+```
+
+---
+
+## Usage Example
+
+### Server
+```luau
+-- ServerScriptService/ShopServer.luau
+local Networker = require(ReplicatedStorage.Networker)
+
+local shopNet = Networker.set("shop")
+
+local PRICES = {
+    pet_egg = 100,
+    speed_upgrade = 250,
 }
+
+-- Player wants to buy something
+shopNet.on("buyItem", function(player: Player, data: { any }?)
+    local itemId = data.itemId
+    local price = PRICES[itemId]
+
+    if not price then
+        warn("Unknown item:", itemId)
+        return
+    end
+
+    -- deduct coins, give item...
+
+    -- notify the client
+    shopNet.push("purchaseSuccess", player, { itemId = itemId })
+end)
+
+-- Player asks for price
+shopNet.on("getItemPrice", function(player: Player, data: { any }?)
+    return PRICES[data.itemId] or 0
+end, { TwoWay = true })
 ```
 
-All keys must be **strings**. Handler functions receive `context` as the first argument (`self`), followed by the player (server-side events/functions only), then any additional arguments.
+### Client
+```luau
+-- StarterPlayerScripts/ShopClient.luau
+local Networker = require(ReplicatedStorage.Networker)
+
+local shopNet = Networker.set("shop")
+
+-- Ask server for price before buying
+local price = shopNet.send("getItemPrice", { itemId = "pet_egg" }, { TwoWay = true })
+print("Pet Egg costs:", price)
+
+-- Buy the item
+shopNet.send("buyItem", { itemId = "pet_egg" })
+
+-- Listen for confirmation
+shopNet.on("purchaseSuccess", function(data: { any }?)
+    print("Successfully bought:", data.itemId)
+end)
+```
 
 ---
 
-## Configuration
+## Action Naming Convention
 
-At the top of `Networker.luau`:
+| Pattern | Direction | Type | Example |
+|---------|-----------|------|---------|
+| `verbNoun` | Client → Server | One-way | `buyItem` `equipPet` `feedBrainrot` |
+| `verbNoun` | Server → Client | One-way | `updateCoins` `syncInventory` |
+| `getX` `checkX` `fetchX` | Client → Server | Two-way | `getItemPrice` `checkInventorySpace` |
 
-```lua
-local REMOTES_FOLDER_NAME = "_remotes"   -- folder name created under the module
-local INVOKE_CLIENT_TIMEOUT = 10          -- seconds before InvokeClient rejects
+---
+
+## Architecture
+
+```
+Client                        Server
+  │                             │
+  │── shopNet.send("buyItem") ──►│
+  │                             │── _serverEventCallbacks["buyItem"](player, data)
+  │                             │
+  │◄── shopNet.push("updateShop", player) ──│
+  │── _clientEventCallbacks["updateShop"](data)
+  │                             │
+  │── shopNet.send("getPrice", _, {TwoWay=true}) ──►│
+  │◄────────────── return 100 ──│
+```
+
+**Under the hood — one namespace, one remote:**
+```
+ReplicatedStorage/
+  Networker/
+    _remotes/
+      shop/
+        RemoteEvent      ← handles all one-way actions for "shop"
+        RemoteFunction   ← handles all two-way actions for "shop"
+      inventory/
+        RemoteEvent
+        RemoteFunction
 ```
 
 ---
 
-## Notes
+## Server-to-Server Communication
 
-- Each namespace can only be initialized **once per side** (client or server). Attempting to initialize the same namespace twice will error.
-- `actionName` values received from clients are validated — they must be non-empty strings. Invalid names are silently dropped with a warning.
-- Numeric method keys in `MethodsConfig` are not supported and will be skipped with a warning. Use string keys only.
-- `:InvokeClient()` should be used sparingly. Prefer `:FireClient()` + a client `:FireServer()` callback pattern for most server→client communication.
-- Call `:Destroy()` when tearing down a namespace (e.g. at the end of a minigame round) to prevent connection leaks.
+Networker handles **client ↔ server** communication only. For server-to-server (service-to-service) communication, use a separate `ServiceBridge` module:
+
+```luau
+-- InventoryServer registers a handler
+ServiceBridge.on("InventoryService", "addItem", function(player, itemId)
+    -- add item to inventory
+end)
+
+-- ShopServer calls it after a purchase
+ServiceBridge.fire("InventoryService", "addItem", player, "pet_egg")
+```
+
+> Each service communicates **only with its own client namespace**. Cross-namespace client communication is an anti-pattern — it creates hidden dependencies that are hard to debug.
+
+---
+
+## Error Handling
+
+All remote calls are wrapped in `pcall`. Errors are propagated with full context:
+
+```
+[Networker] 'shop:buyItem' -> attempt to index nil value 'itemId'
+```
+
+Unhandled actions produce a warning instead of a silent failure:
+```
+[Networker] 'shop' received unhandled action: 'unknownAction'
+```
 
 ---
 
 ## License
+MIT — free to use in any Roblox project.
 
-MIT — see `LICENSE` for details.
+---
+
+*Made by vynx777*

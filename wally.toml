@@ -1,11 +1,10 @@
 [package]
 name = "vynx777/networker"
-description = "A strictly typed, Promise-based networking wrapper for Roblox client-server communication."
-version = "0.0.3"
+description = "Namespace-based networking layer for Roblox. Routes all communication through a single RemoteEvent and RemoteFunction per namespace via dispatch tables, eliminating stacked connections."
+version = "0.0.4"
 registry = "https://github.com/UpliftGames/wally-index"
 realm = "shared"
 authors = ["vynx777"]
 license = "MIT"
 
 [dependencies]
-Promise = "evaera/promise@^4.0.0"
